@@ -73,9 +73,12 @@ def get_state_dot(X, t, U, aero_m):
 
 #https://aviation.stackexchange.com/questions/67897/what-are-the-maximum-possible-stabilizer-and-elevator-deflections-for-the-a320
 #  The maximum trimmable horizontal stabiliser deflection is separately 13.5º nose up to 4º nose dow
+
 def get_trim_level_flight(aero_m, altp, tas, use_saturations=False):
-    """Compute level flight equilibrium using dtrim
-    """
+    """Compute level flight equilibrium using dtrim, with optional saturation checks."""
+    import numpy as np
+    import scipy.optimize
+
     # Compute atmospheric data
     pamb, tamb = aero_m.atm.atmosphere(altp)
     rho = aero_m.atm.air_density(pamb, tamb)
@@ -84,39 +87,38 @@ def get_trim_level_flight(aero_m, altp, tas, use_saturations=False):
     re = aero_m.atm.reynolds_number(pamb, tamb, mach)
     pdyn = 0.5 * rho * tas ** 2
 
-
     dm, nz, q, path = 0., 1, 0., 0.     # Steady level flight
 
     def fct(x):
-        dthr, aoa, dtrim = x[0], x[1], x[2]   # Variables to be computed: throttle, angle of attack, dtrim
-
-        # Compute aerodynamic coefficients
+        dthr, aoa, dtrim = x[0], x[1], x[2]
         cz, cx, cm = aero_m.get_aero_coefs(aoa, mach, dtrim, dm, q, tas)
-        
-        fu = aero_m.thrust(sigma, mach, dthr)            # Get usable thrust (all engines)
+        fu = aero_m.thrust(sigma, mach, dthr)
+        lift = pdyn * aero_m.w.s * cz
+        drag = pdyn * aero_m.w.s * cx
+        pitch = pdyn * aero_m.w.s * aero_m.w.mac * cm
 
-        lift = pdyn * aero_m.w.s * cz                    # Lift force (FIXME: not the sum of wing + tail surface?)
-        drag = pdyn * aero_m.w.s * cx                    # Drag force
-        pitch = pdyn * aero_m.w.s * aero_m.w.mac * cm    # Pitch moment
-
-        y1 = fu * np.cos(aoa) - drag                        # Thrust balances drag (supposing thrust is parallel to speed)
-        y2 = nz * aero_m.get_mass() * aero_m.atm.g - lift - fu * np.sin(aoa)    # Lift balances weight
-        y3 = aero_m.dzf * fu + pitch                             # Pitch moment balances thrust moment
+        y1 = fu * np.cos(aoa) - drag
+        y2 = nz * aero_m.get_mass() * aero_m.atm.g - lift - fu * np.sin(aoa)
+        y3 = aero_m.dzf * fu + pitch
 
         return [y1, y2, y3]
 
     xini = [0, 0, 0]
-    output_dict = scipy.optimize.fsolve(fct, x0=xini, args=(), full_output=True)
-    if (output_dict[2]!=1): raise Exception("Convergence problem")
+    try:
+        output_dict = scipy.optimize.fsolve(fct, x0=xini, args=(), full_output=True)
+        if (output_dict[2] != 1):
+            return None  # Pas de convergence
+    except Exception:
+        return None  # Problème lors de la résolution
 
-    dthr = output_dict[0][0]    # Throttle
-    aoa = output_dict[0][1]     # Angle of attack
-    dtrim = output_dict[0][2]   # dtrim
+    dthr, aoa, dtrim = output_dict[0]
+
     if use_saturations:
-        if dthr<0 or dthr>1.: raise Exception("Throttle saturation")
-        if dtrim < np.deg2rad(-13.5) or dtrim > np.deg2rad(4.): raise Exception("HTP saturation")
-    
-    
+        if dthr < 0 or dthr > 1.:
+            return None  # Saturation throttle
+        if dtrim < np.deg2rad(-13.5) or dtrim > np.deg2rad(4.):
+            return None  # Saturation dtrim
+
     # Update aerodynamic coefficients
     cz, cx, cm = aero_m.get_aero_coefs(aoa, mach, dtrim, dm, q, tas)
 
@@ -131,8 +133,8 @@ def get_trim_level_flight(aero_m, altp, tas, use_saturations=False):
             "cx": [cx, "no_dim", 4],
             "cm": [cm, "no_dim", 4],
             "fu": [fu, "daN"],
-            "lod": [cz/cx, "no_dim"] }#,
-            #"czmax": [czmax, "no_dim"]}
+            "lod": [cz/cx, "no_dim"]}
+
 
 
 def graceful_trim(aero_m, h, tas, use_saturations=False):
